@@ -164,10 +164,6 @@
 		<property name="preInterceptors" ref="serviceInterceptors"/>
 		<property name="transactionAttributeSource" ref="transactionAttributeSource"/>
 	</bean>
-		</property>
-		<property name="preInterceptors" ref="serviceInterceptors"/>
-		<property name="transactionAttributeSource" ref="transactionAttributeSource"/>
-	</bean>
 	<bean id="seqReceiptNumberGeneratorService"
 	      class="org.springframework.transaction.interceptor.TransactionProxyFactoryBean">
 		<property name="transactionManager" ref="transactionManager"/>

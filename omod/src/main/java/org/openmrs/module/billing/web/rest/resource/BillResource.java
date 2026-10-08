@@ -400,4 +400,3 @@ public class BillResource extends DataDelegatingCrudResource<Bill> {
 		}).collect(Collectors.toList());
 	}
 }
-
