@@ -9,10 +9,17 @@
  */
 package org.openmrs.module.billing.db;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Arrays;
+import java.util.Calendar;
+import java.util.Collections;
 import java.util.Date;
+import java.util.GregorianCalendar;
 import java.util.List;
 import java.util.UUID;
 import java.util.stream.Collectors;
@@ -25,15 +32,30 @@ import org.openmrs.api.ProviderService;
 import org.openmrs.api.context.Context;
 import org.openmrs.module.billing.TestConstants;
 import org.openmrs.module.billing.api.CashPointService;
+import org.openmrs.module.billing.api.BillDiscountService;
+import org.openmrs.module.billing.api.BillRefundService;
 import org.openmrs.module.billing.api.base.PagingInfo;
 import org.openmrs.module.billing.api.db.BillDAO;
 import org.openmrs.module.billing.api.model.Bill;
 import org.openmrs.module.billing.api.model.BillStatus;
 import org.openmrs.module.billing.api.model.DiscountStatus;
+import org.openmrs.module.billing.api.model.RefundStatus;
 import org.openmrs.module.billing.api.search.BillSearch;
 import org.openmrs.test.jupiter.BaseModuleContextSensitiveTest;
 
 public class HibernateBillDAOTest extends BaseModuleContextSensitiveTest {
+	
+	private static final String LOCATION_0_UUID = "ef93c695-ac43-450a-93f8-4b2b4d50a3c8";
+	
+	private static final String LOCATION_1_UUID = "FF8081813D91C2DA013D91C3D8040001";
+	
+	private static final String LOCATION_WITHOUT_CASH_POINT_UUID = "FF8081813D93C2DA012D91C3D8040041";
+	
+	private static final String BILL_0_UUID = "4028814B39B565A20139B95D74360004";
+	
+	private static final String BILL_1_UUID = "5028814B39B565A20139B95D74360004";
+	
+	private static final String BILL_2_UUID = "6028814B39B565A20139B95D74360004";
 	
 	private BillDAO billDAO;
 	
@@ -43,12 +65,18 @@ public class HibernateBillDAOTest extends BaseModuleContextSensitiveTest {
 	
 	private CashPointService cashPointService;
 	
+	private BillDiscountService billDiscountService;
+	
+	private BillRefundService billRefundService;
+	
 	@BeforeEach
 	public void setup() {
 		billDAO = Context.getRegisteredComponent("billDAO", BillDAO.class);
 		patientService = Context.getPatientService();
 		providerService = Context.getProviderService();
 		cashPointService = Context.getService(CashPointService.class);
+		billDiscountService = Context.getService(BillDiscountService.class);
+		billRefundService = Context.getService(BillRefundService.class);
 		
 		executeDataSet(TestConstants.CORE_DATASET2);
 		executeDataSet(TestConstants.BASE_DATASET_DIR + "StockOperationType.xml");
@@ -203,6 +231,82 @@ public class HibernateBillDAOTest extends BaseModuleContextSensitiveTest {
 	}
 	
 	@Test
+	public void getBills_shouldFilterByLocationUuid() {
+		Bill billAtLocation1 = new Bill();
+		billAtLocation1.setCashier(providerService.getProvider(0));
+		billAtLocation1.setPatient(patientService.getPatient(1));
+		billAtLocation1.setCashPoint(cashPointService.getCashPoint(1));
+		billAtLocation1.setReceiptNumber("LOC1-" + UUID.randomUUID());
+		billAtLocation1.setStatus(BillStatus.PENDING);
+		billDAO.saveBill(billAtLocation1);
+		
+		List<Bill> location1Bills = billDAO.getBills(BillSearch.builder().locationUuid(LOCATION_1_UUID).build(), null);
+		assertEquals(Collections.singletonList(billAtLocation1.getUuid()), uuids(location1Bills));
+		
+		List<String> location0Uuids = uuids(
+		    billDAO.getBills(BillSearch.builder().locationUuid(LOCATION_0_UUID).build(), null));
+		assertTrue(location0Uuids.containsAll(Arrays.asList(BILL_0_UUID, BILL_1_UUID, BILL_2_UUID)));
+		assertFalse(location0Uuids.contains(billAtLocation1.getUuid()));
+	}
+	
+	@Test
+	public void getBills_shouldReturnEmptyListForLocationWithoutBills() {
+		List<Bill> bills = billDAO.getBills(BillSearch.builder().locationUuid(LOCATION_WITHOUT_CASH_POINT_UUID).build(),
+		    null);
+		assertTrue(bills.isEmpty());
+	}
+	
+	@Test
+	public void getBills_shouldFilterByStartDateInclusive() {
+		List<String> resultUuids = uuids(
+		    billDAO.getBills(BillSearch.builder().startDate(date(2012, Calendar.FEBRUARY, 1)).build(), null));
+		
+		assertFalse(resultUuids.contains(BILL_0_UUID), "Bill 0 (2012-01-01) is before startDate");
+		assertTrue(resultUuids.contains(BILL_1_UUID), "Bill 1 (2012-02-01) equals startDate and must be included");
+		assertTrue(resultUuids.contains(BILL_2_UUID), "Bill 2 (2012-03-01) is after startDate");
+	}
+	
+	@Test
+	public void getBills_shouldFilterByEndDateInclusive() {
+		List<String> resultUuids = uuids(
+		    billDAO.getBills(BillSearch.builder().endDate(date(2012, Calendar.FEBRUARY, 1)).build(), null));
+		
+		assertTrue(resultUuids.contains(BILL_0_UUID), "Bill 0 (2012-01-01) is before endDate");
+		assertTrue(resultUuids.contains(BILL_1_UUID), "Bill 1 (2012-02-01) equals endDate and must be included");
+		assertFalse(resultUuids.contains(BILL_2_UUID), "Bill 2 (2012-03-01) is after endDate");
+	}
+	
+	@Test
+	public void getBills_shouldTreatEndDateAsExactInstantNotWholeDay() {
+		Bill midMorningBill = new Bill();
+		midMorningBill.setCashier(providerService.getProvider(0));
+		midMorningBill.setPatient(patientService.getPatient(1));
+		midMorningBill.setCashPoint(cashPointService.getCashPoint(0));
+		midMorningBill.setReceiptNumber("MIDDAY-" + UUID.randomUUID());
+		midMorningBill.setStatus(BillStatus.PENDING);
+		midMorningBill.setDateCreated(new GregorianCalendar(2012, Calendar.MARCH, 15, 10, 30).getTime());
+		billDAO.saveBill(midMorningBill);
+		
+		List<String> upToMidnight = uuids(
+		    billDAO.getBills(BillSearch.builder().endDate(date(2012, Calendar.MARCH, 15)).build(), null));
+		assertFalse(upToMidnight.contains(midMorningBill.getUuid()),
+		    "endDate of 2012-03-15 00:00 must exclude a bill created at 10:30 that day");
+		
+		List<String> upToNextMidnight = uuids(
+		    billDAO.getBills(BillSearch.builder().endDate(date(2012, Calendar.MARCH, 16)).build(), null));
+		assertTrue(upToNextMidnight.contains(midMorningBill.getUuid()),
+		    "endDate of 2012-03-16 00:00 must include a bill created 2012-03-15 10:30");
+	}
+	
+	@Test
+	public void getBills_shouldFilterByDateRange() {
+		BillSearch search = BillSearch.builder().startDate(date(2012, Calendar.JANUARY, 15))
+		        .endDate(date(2012, Calendar.FEBRUARY, 15)).build();
+		
+		assertEquals(Collections.singletonList(BILL_1_UUID), uuids(billDAO.getBills(search, null)));
+	}
+	
+	@Test
 	public void getBills_shouldExcludeVoidedBillsByDefault() {
 		BillSearch billSearch = new BillSearch();
 		billSearch.setIncludeVoided(false);
@@ -239,6 +343,28 @@ public class HibernateBillDAOTest extends BaseModuleContextSensitiveTest {
 		
 		Bill deletedBill = billDAO.getBill(billId);
 		assertNull(deletedBill);
+	}
+	
+	@Test
+	public void purgeBill_shouldDeleteDiscountsAndRefunds() {
+		executeDataSet(TestConstants.BASE_DATASET_DIR + "BillPurgeCascadeTest.xml");
+		
+		Bill bill = billDAO.getBill(900);
+		assertNotNull(bill);
+		assertNotNull(billDiscountService.getBillDiscountByUuid("90000000-0000-0000-0000-000000000d00"));
+		assertNotNull(billDiscountService.getBillDiscountByUuid("90000000-0000-0000-0000-000000000d01"));
+		assertNotNull(billRefundService.getBillRefundByUuid("b0000000-0000-0000-0000-000000000900"));
+		assertNotNull(billRefundService.getBillRefundByUuid("b0000000-0000-0000-0000-000000000901"));
+		
+		billDAO.purgeBill(bill);
+		Context.flushSession();
+		Context.clearSession();
+		
+		assertNull(billDAO.getBill(900));
+		assertNull(billDiscountService.getBillDiscountByUuid("90000000-0000-0000-0000-000000000d00"));
+		assertNull(billDiscountService.getBillDiscountByUuid("90000000-0000-0000-0000-000000000d01"));
+		assertNull(billRefundService.getBillRefundByUuid("b0000000-0000-0000-0000-000000000900"));
+		assertNull(billRefundService.getBillRefundByUuid("b0000000-0000-0000-0000-000000000901"));
 	}
 	
 	@Test
@@ -375,7 +501,44 @@ public class HibernateBillDAOTest extends BaseModuleContextSensitiveTest {
 		    "Bill 1003 has only a REJECTED discount — must not appear for PENDING|APPROVED filter");
 	}
 	
+	@Test
+	public void getBills_shouldFilterByRefundStatus() {
+		executeDataSet(TestConstants.BASE_DATASET_DIR + "BillRefundStatusFilterTest.xml");
+		BillSearch search = BillSearch.builder().refundStatuses(Arrays.asList(RefundStatus.REQUESTED)).build();
+		List<Bill> results = billDAO.getBills(search, null);
+		List<String> resultUuids = uuids(results);
+		
+		assertTrue(resultUuids.contains("c1000000-0000-0000-0000-000000000001"), "Expected bill 2001 (REQUESTED refund)");
+		assertTrue(resultUuids.contains("c4000000-0000-0000-0000-000000000004"),
+		    "Expected bill 2004 (REQUESTED + COMPLETED refunds)");
+		assertFalse(resultUuids.contains("c5000000-0000-0000-0000-000000000005"),
+		    "Bill 2005 has only a voided REQUESTED refund — must be excluded");
+		assertFalse(resultUuids.contains("c6000000-0000-0000-0000-000000000006"),
+		    "Bill 2006 has no refunds at all — must be excluded by the EXISTS predicate");
+	}
+	
+	@Test
+	public void getBills_shouldNotDuplicateBillsWithMultipleMatchingRefunds() {
+		executeDataSet(TestConstants.BASE_DATASET_DIR + "BillRefundStatusFilterTest.xml");
+		BillSearch search = BillSearch.builder()
+		        .refundStatuses(Arrays.asList(RefundStatus.REQUESTED, RefundStatus.COMPLETED)).build();
+		List<Bill> results = billDAO.getBills(search, null);
+		List<String> resultUuids = uuids(results);
+		
+		long countOf2004 = results.stream().filter(b -> "c4000000-0000-0000-0000-000000000004".equals(b.getUuid())).count();
+		
+		assertEquals(1, countOf2004, "Bill 2004 matches both REQUESTED and COMPLETED refunds but must appear exactly once");
+		assertFalse(resultUuids.contains("c3000000-0000-0000-0000-000000000003"),
+		    "Bill 2003 has only a REJECTED refund — must not appear for REQUESTED|COMPLETED filter");
+		assertFalse(resultUuids.contains("c5000000-0000-0000-0000-000000000005"),
+		    "Bill 2005 has only a voided REQUESTED refund — must be excluded even in multi-status query");
+	}
+	
 	private List<String> uuids(List<Bill> bills) {
 		return bills.stream().map(Bill::getUuid).sorted().collect(Collectors.toList());
+	}
+	
+	private static Date date(int year, int month, int day) {
+		return new GregorianCalendar(year, month, day).getTime();
 	}
 }

@@ -23,6 +23,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.openmrs.BaseOpenmrsData;
 import org.openmrs.Patient;
 import org.openmrs.Provider;
+import org.openmrs.Visit;
 import org.openmrs.api.context.Context;
 import org.openmrs.module.billing.api.util.PrivilegeConstants;
 import org.openmrs.module.stockmanagement.api.model.StockItem;
@@ -48,6 +49,8 @@ public class Bill extends BaseOpenmrsData {
 	
 	private CashPoint cashPoint;
 	
+	private Visit visit;
+	
 	private Bill billAdjusted;
 	
 	private BillStatus status;
@@ -65,6 +68,24 @@ public class Bill extends BaseOpenmrsData {
 	private Set<BillDiscount> discounts;
 	
 	private Set<BillRefund> refunds;
+	
+	/**
+	 * Returns every non-voided refund on this bill. Voided rows are excluded — for the full audit
+	 * history, query {@code BillRefundService.getRefundsByBillId} (or the equivalent REST search at
+	 * {@code /billRefund?bill=<uuid>}).
+	 */
+	public List<BillRefund> getActiveRefunds() {
+		if (refunds == null) {
+			return Collections.emptyList();
+		}
+		List<BillRefund> active = new ArrayList<>();
+		for (BillRefund r : refunds) {
+			if (r != null && !r.getVoided()) {
+				active.add(r);
+			}
+		}
+		return active;
+	}
 	
 	/**
 	 * Returns every non-voided discount on this bill (bill-level and line-item scoped). Voided rows are
@@ -236,7 +257,8 @@ public class Bill extends BaseOpenmrsData {
 		        || current == BillStatus.PARTIALLY_REFUNDED) {
 			return;
 		}
-		if (!this.getPayments().isEmpty() && getTotalPayments().compareTo(BigDecimal.ZERO) > 0) {
+		if (this.getPayments() != null && !this.getPayments().isEmpty()
+		        && getTotalPayments().compareTo(BigDecimal.ZERO) > 0) {
 			// Approved discount exceeds the current bill total — likely a line item was voided
 			// after approval. Stay POSTED so a human can void/reapply rather than letting any
 			// non-zero payment silently flip the bill to PAID.

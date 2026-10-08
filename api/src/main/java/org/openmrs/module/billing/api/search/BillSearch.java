@@ -9,6 +9,7 @@
  */
 package org.openmrs.module.billing.api.search;
 
+import java.util.Date;
 import java.util.List;
 
 import lombok.AllArgsConstructor;
@@ -18,6 +19,7 @@ import lombok.NoArgsConstructor;
 import lombok.Setter;
 import org.openmrs.module.billing.api.model.BillStatus;
 import org.openmrs.module.billing.api.model.DiscountStatus;
+import org.openmrs.module.billing.api.model.RefundStatus;
 
 /**
  * A search criteria holder for {@link org.openmrs.module.billing.api.model.Bill} queries. This
@@ -37,13 +39,23 @@ public class BillSearch {
 	
 	private String cashPointUuid;
 	
+	private String visitUuid;
+	
 	private List<BillStatus> statuses;
 	
 	private List<DiscountStatus> discountStatuses;
+	
+	private List<RefundStatus> refundStatuses;
 	
 	private String patientName;
 	
 	private Boolean includeVoided = false;
 	
 	private Boolean includeVoidedLineItems = false;
+	
+	private String locationUuid;
+	
+	private Date startDate;
+	
+	private Date endDate;
 }

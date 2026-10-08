@@ -17,10 +17,18 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.Collections;
+import java.util.Date;
+import java.util.GregorianCalendar;
+import java.util.HashSet;
 import java.util.List;
 
 import javax.servlet.http.HttpServletRequest;
@@ -29,12 +37,27 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
+import org.openmrs.Patient;
+import org.openmrs.Provider;
+import org.openmrs.Visit;
+import org.openmrs.api.VisitService;
 import org.openmrs.api.context.Context;
+import org.openmrs.messagesource.MessageSourceService;
 import org.openmrs.module.billing.api.BillService;
 import org.openmrs.module.billing.api.base.PagingInfo;
+import org.openmrs.module.billing.api.model.Bill;
+import org.openmrs.module.billing.api.model.BillRefund;
+import org.openmrs.module.billing.api.model.BillStatus;
+import org.openmrs.module.billing.api.model.CashPoint;
 import org.openmrs.module.billing.api.model.DiscountStatus;
+import org.openmrs.module.billing.api.model.RefundStatus;
 import org.openmrs.module.billing.api.search.BillSearch;
+import org.openmrs.module.billing.api.util.PrivilegeConstants;
 import org.openmrs.module.webservices.rest.web.RequestContext;
+import org.openmrs.module.webservices.rest.web.api.RestService;
+import org.openmrs.module.webservices.rest.web.representation.Representation;
+import org.openmrs.module.webservices.rest.web.resource.api.Converter;
+import org.openmrs.module.webservices.rest.web.resource.impl.DelegatingResourceDescription;
 import org.openmrs.module.webservices.rest.web.response.InvalidSearchException;
 
 /**
@@ -75,18 +98,33 @@ public class BillResourceTest {
 		}
 	}
 	
-	/**
-	 * Builds a mocked {@link RequestContext} with the given discountStatus request parameter value
-	 * (null means the parameter is absent).
-	 */
 	private RequestContext buildContext(String discountStatusParam) {
 		HttpServletRequest req = mock(HttpServletRequest.class);
-		org.mockito.Mockito.when(req.getParameter("discountStatus")).thenReturn(discountStatusParam);
+		when(req.getParameter("discountStatus")).thenReturn(discountStatusParam);
 		
 		RequestContext context = mock(RequestContext.class);
-		org.mockito.Mockito.when(context.getRequest()).thenReturn(req);
-		org.mockito.Mockito.when(context.getStartIndex()).thenReturn(0);
-		org.mockito.Mockito.when(context.getLimit()).thenReturn(10);
+		when(context.getRequest()).thenReturn(req);
+		when(context.getStartIndex()).thenReturn(0);
+		when(context.getLimit()).thenReturn(10);
+		
+		return context;
+	}
+	
+	private BillRefund refundWithStatus(RefundStatus status, boolean voided) {
+		BillRefund refund = new BillRefund();
+		refund.setStatus(status);
+		refund.setVoided(voided);
+		return refund;
+	}
+	
+	private RequestContext buildRefundContext(String refundStatusParam) {
+		HttpServletRequest req = mock(HttpServletRequest.class);
+		when(req.getParameter("refundStatus")).thenReturn(refundStatusParam);
+		
+		RequestContext context = mock(RequestContext.class);
+		when(context.getRequest()).thenReturn(req);
+		when(context.getStartIndex()).thenReturn(0);
+		when(context.getLimit()).thenReturn(10);
 		
 		return context;
 	}
@@ -126,5 +164,264 @@ public class BillResourceTest {
 		resource.doSearch(context);
 		
 		assertNull(capturedSearches.get(0).getDiscountStatuses());
+	}
+	
+	@Test
+	public void doSearch_shouldParseSingleRefundStatusParam() {
+		RequestContext context = buildRefundContext("REQUESTED");
+		
+		resource.doSearch(context);
+		
+		assertEquals(Collections.singletonList(RefundStatus.REQUESTED), capturedSearches.get(0).getRefundStatuses());
+	}
+	
+	@Test
+	public void doSearch_shouldNotSetRefundStatusesWhenParamMissing() {
+		RequestContext context = buildRefundContext(null);
+		
+		resource.doSearch(context);
+		
+		assertNull(capturedSearches.get(0).getRefundStatuses());
+	}
+	
+	@Test
+	public void doSearch_shouldParseCommaSeparatedRefundStatuses() {
+		RequestContext context = buildRefundContext("approved, rejected");
+		
+		resource.doSearch(context);
+		
+		assertEquals(Arrays.asList(RefundStatus.APPROVED, RefundStatus.REJECTED),
+		    capturedSearches.get(0).getRefundStatuses());
+	}
+	
+	@Test
+	public void doSearch_shouldRejectInvalidRefundStatus() {
+		RequestContext context = buildRefundContext("MAYBE");
+		
+		InvalidSearchException ex = assertThrows(InvalidSearchException.class, () -> resource.doSearch(context));
+		assertTrue(ex.getMessage().contains("MAYBE"));
+		assertTrue(ex.getMessage().contains("REQUESTED"));
+	}
+	
+	@Test
+	public void doSearch_shouldPassVisitUuidIntoBillSearch() {
+		RequestContext context = mock(RequestContext.class);
+		HttpServletRequest request = mock(HttpServletRequest.class);
+		when(context.getRequest()).thenReturn(request);
+		when(request.getParameter("visitUuid")).thenReturn("11111111-1111-1111-1111-111111111111");
+		when(context.getLimit()).thenReturn(10);
+		when(context.getStartIndex()).thenReturn(0);
+		
+		resource.doSearch(context);
+		
+		assertEquals(1, capturedSearches.size());
+		assertEquals("11111111-1111-1111-1111-111111111111", capturedSearches.get(0).getVisitUuid());
+	}
+	
+	@Test
+	public void doSearch_shouldLeaveVisitUuidNullWhenAbsent() {
+		RequestContext context = mock(RequestContext.class);
+		HttpServletRequest request = mock(HttpServletRequest.class);
+		when(context.getRequest()).thenReturn(request);
+		when(request.getParameter("visitUuid")).thenReturn(null);
+		when(context.getLimit()).thenReturn(10);
+		when(context.getStartIndex()).thenReturn(0);
+		
+		resource.doSearch(context);
+		
+		assertNull(capturedSearches.get(0).getVisitUuid());
+	}
+	
+	private RequestContext buildContextWithParams(String locationUuid, String startDate, String endDate) {
+		HttpServletRequest request = mock(HttpServletRequest.class);
+		when(request.getParameter("locationUuid")).thenReturn(locationUuid);
+		when(request.getParameter("startDate")).thenReturn(startDate);
+		when(request.getParameter("endDate")).thenReturn(endDate);
+		
+		RequestContext context = mock(RequestContext.class);
+		when(context.getRequest()).thenReturn(request);
+		when(context.getStartIndex()).thenReturn(0);
+		when(context.getLimit()).thenReturn(10);
+		return context;
+	}
+	
+	private void stubDateConversion() {
+		contextMock.when(() -> Context.getService(RestService.class)).thenReturn(mock(RestService.class));
+		contextMock.when(() -> Context.getRegisteredComponents(Converter.class)).thenReturn(Collections.emptyList());
+		contextMock.when(Context::getMessageSourceService).thenReturn(mock(MessageSourceService.class));
+	}
+	
+	@Test
+	public void doSearch_shouldPassLocationUuidIntoBillSearch() {
+		RequestContext context = buildContextWithParams("22222222-2222-2222-2222-222222222222", null, null);
+		
+		resource.doSearch(context);
+		
+		assertEquals("22222222-2222-2222-2222-222222222222", capturedSearches.get(0).getLocationUuid());
+	}
+	
+	@Test
+	public void doSearch_shouldLeaveLocationAndDatesNullWhenAbsent() {
+		RequestContext context = buildContextWithParams(null, null, null);
+		
+		resource.doSearch(context);
+		
+		assertNull(capturedSearches.get(0).getLocationUuid());
+		assertNull(capturedSearches.get(0).getStartDate());
+		assertNull(capturedSearches.get(0).getEndDate());
+	}
+	
+	@Test
+	public void doSearch_shouldParseIsoStartAndEndDates() {
+		stubDateConversion();
+		RequestContext context = buildContextWithParams(null, "2026-08-01", "2026-08-31T23:59:59.000+0000");
+		
+		resource.doSearch(context);
+		
+		BillSearch search = capturedSearches.get(0);
+		assertEquals(new GregorianCalendar(2026, Calendar.AUGUST, 1).getTime(), search.getStartDate());
+		assertEquals(Date.from(Instant.parse("2026-08-31T23:59:59Z")), search.getEndDate());
+	}
+	
+	@Test
+	public void doSearch_shouldRejectInvalidDate() {
+		stubDateConversion();
+		RequestContext context = buildContextWithParams(null, "31/08/2026", null);
+		
+		InvalidSearchException ex = assertThrows(InvalidSearchException.class, () -> resource.doSearch(context));
+		assertTrue(ex.getMessage().contains("startDate"));
+		assertTrue(ex.getMessage().contains("31/08/2026"));
+		assertTrue(capturedSearches.isEmpty());
+	}
+	
+	@Test
+	public void doSearch_shouldRejectStartDateAfterEndDate() {
+		stubDateConversion();
+		RequestContext context = buildContextWithParams(null, "2026-09-01", "2026-08-01");
+		
+		InvalidSearchException ex = assertThrows(InvalidSearchException.class, () -> resource.doSearch(context));
+		assertTrue(ex.getMessage().contains("startDate must not be after endDate"));
+		assertTrue(capturedSearches.isEmpty());
+	}
+	
+	@Test
+	public void save_shouldAutoPopulateVisitWhenPatientHasSingleActiveVisit() {
+		VisitService visitService = mock(VisitService.class);
+		contextMock.when(() -> Context.getVisitService()).thenReturn(visitService);
+		
+		Patient patient = new Patient();
+		Visit visit = new Visit();
+		when(visitService.getActiveVisitsByPatient(patient)).thenReturn(Collections.singletonList(visit));
+		when(billService.saveBill(any())).thenAnswer(inv -> inv.getArgument(0));
+		
+		Bill bill = new Bill();
+		bill.setPatient(patient);
+		bill.setCashier(new Provider());
+		bill.setCashPoint(new CashPoint());
+		bill.setStatus(BillStatus.PENDING);
+		bill.setPayments(new HashSet<>());
+		
+		resource.save(bill);
+		
+		assertEquals(visit, bill.getVisit());
+	}
+	
+	@Test
+	public void save_shouldLeaveVisitNullWhenZeroActiveVisits() {
+		VisitService visitService = mock(VisitService.class);
+		contextMock.when(() -> Context.getVisitService()).thenReturn(visitService);
+		
+		Patient patient = new Patient();
+		when(visitService.getActiveVisitsByPatient(patient)).thenReturn(Collections.emptyList());
+		when(billService.saveBill(any())).thenAnswer(inv -> inv.getArgument(0));
+		
+		Bill bill = new Bill();
+		bill.setPatient(patient);
+		bill.setCashier(new Provider());
+		bill.setCashPoint(new CashPoint());
+		bill.setStatus(BillStatus.PENDING);
+		bill.setPayments(new HashSet<>());
+		
+		resource.save(bill);
+		
+		assertNull(bill.getVisit());
+	}
+	
+	@Test
+	public void save_shouldLeaveVisitNullWhenMultipleActiveVisits() {
+		VisitService visitService = mock(VisitService.class);
+		contextMock.when(() -> Context.getVisitService()).thenReturn(visitService);
+		
+		Patient patient = new Patient();
+		when(visitService.getActiveVisitsByPatient(patient)).thenReturn(Arrays.asList(new Visit(), new Visit()));
+		when(billService.saveBill(any())).thenAnswer(inv -> inv.getArgument(0));
+		
+		Bill bill = new Bill();
+		bill.setPatient(patient);
+		bill.setCashier(new Provider());
+		bill.setCashPoint(new CashPoint());
+		bill.setStatus(BillStatus.PENDING);
+		bill.setPayments(new HashSet<>());
+		
+		resource.save(bill);
+		
+		assertNull(bill.getVisit());
+	}
+	
+	@Test
+	public void getActiveRefunds_shouldExcludeVoidedRefunds() {
+		contextMock.when(() -> Context.hasPrivilege(PrivilegeConstants.VIEW_REFUNDS)).thenReturn(true);
+		
+		Bill bill = new Bill();
+		bill.setRefunds(new HashSet<>(Arrays.asList(refundWithStatus(RefundStatus.REQUESTED, false),
+		    refundWithStatus(RefundStatus.APPROVED, false), refundWithStatus(RefundStatus.REQUESTED, true))));
+		
+		List<BillRefund> result = resource.getActiveRefunds(bill);
+		
+		assertEquals(2, result.size());
+		assertTrue(result.stream().noneMatch(r -> r.getVoided()));
+	}
+	
+	@Test
+	public void getActiveRefunds_shouldReturnEmptyWhenBillHasNoRefunds() {
+		contextMock.when(() -> Context.hasPrivilege(PrivilegeConstants.VIEW_REFUNDS)).thenReturn(true);
+		
+		Bill bill = new Bill();
+		
+		List<BillRefund> result = resource.getActiveRefunds(bill);
+		
+		assertEquals(0, result.size());
+	}
+	
+	@Test
+	public void getRepresentationDescription_shouldIncludeRefundsInDefaultAndFullRep() {
+		DelegatingResourceDescription defaultRep = resource.getRepresentationDescription(Representation.DEFAULT);
+		DelegatingResourceDescription fullRep = resource.getRepresentationDescription(Representation.FULL);
+		
+		assertTrue(defaultRep.getProperties().containsKey("refunds"), "DEFAULT representation must include refunds");
+		assertTrue(fullRep.getProperties().containsKey("refunds"), "FULL representation must include refunds");
+	}
+	
+	@Test
+	public void save_shouldKeepCallerSuppliedVisit() {
+		VisitService visitService = mock(VisitService.class);
+		contextMock.when(() -> Context.getVisitService()).thenReturn(visitService);
+		
+		Patient patient = new Patient();
+		Visit caller = new Visit();
+		when(billService.saveBill(any())).thenAnswer(inv -> inv.getArgument(0));
+		
+		Bill bill = new Bill();
+		bill.setPatient(patient);
+		bill.setVisit(caller);
+		bill.setCashier(new Provider());
+		bill.setCashPoint(new CashPoint());
+		bill.setStatus(BillStatus.PENDING);
+		bill.setPayments(new HashSet<>());
+		
+		resource.save(bill);
+		
+		assertEquals(caller, bill.getVisit());
+		verify(visitService, never()).getActiveVisitsByPatient(any());
 	}
 }
